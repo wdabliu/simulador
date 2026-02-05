@@ -1,0 +1,5 @@
+sizeof(rtcp_settings_t)=20
+GRBL_NVS_SIZE=1120
+NVS_SIZE=4096
+hal.nvs.size=1120
+nvs_alloc OK, address=1120

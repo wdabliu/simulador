@@ -1,0 +1,4 @@
+C:/simulador/build/CMakeFiles/grblHAL_sim.dir
+C:/simulador/build/CMakeFiles/grblHAL_validator.dir
+C:/simulador/build/CMakeFiles/edit_cache.dir
+C:/simulador/build/CMakeFiles/rebuild_cache.dir
