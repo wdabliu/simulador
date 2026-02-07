@@ -238,8 +238,9 @@
  *     - Tolerancia para reusar valores sin/cos cacheados
  *     - Evita recálculos innecesarios en movimientos pequeños
  */
-#define MAX_CHORD_ERROR_MM  0.01f
-#define TRIG_CACHE_TOL      0.001f
+#define MAX_CHORD_ERROR_MM     0.01f
+#define MAX_CHORD_ERROR_G0_MM  0.5f    /* Tolerancia G0: 50x más relajada que G1 */
+#define TRIG_CACHE_TOL         0.001f
 
 /* Validación de constantes removida para evitar error de preprocesador con floats */
 // #if MAX_SEG_LENGTH_MM <= 0
@@ -1157,9 +1158,11 @@ static float *rtcp_segment_line(float *target, float *position,
          *   - Precisión configurable y verificable
          *   - Reducción típica: 17x menos segmentos
          * 
-         * NO segmentamos G0 (rápidos) - prioridad es velocidad.
+         * G0 se segmenta con tolerancia relajada (MAX_CHORD_ERROR_G0_MM)
+         * para mantener seguridad RTCP sin sacrificar velocidad.
+         * Patrón confirmado: delta.c segmenta G0 igual que G1.
          */
-        if ((segmented = !pl_data->condition.rapid_motion && max_rot > 0.001f)) {
+        if ((segmented = max_rot > 0.001f)) {
             
             /* Calcular punto medio TCP */
             float tcp_mid[N_AXIS];
@@ -1182,10 +1185,13 @@ static float *rtcp_segment_line(float *target, float *position,
                 err_sq += d * d;
             }
             
-            if (err_sq > MAX_CHORD_ERROR_MM * MAX_CHORD_ERROR_MM) {
+            float tol = pl_data->condition.rapid_motion 
+                        ? MAX_CHORD_ERROR_G0_MM 
+                        : MAX_CHORD_ERROR_MM;
+            if (err_sq > tol * tol) {
                 /* N = ceil(sqrt(error / tolerancia)) × 2 (factor de seguridad) */
                 float err = sqrtf(err_sq);
-                iterations = (uint_fast16_t)(ceilf(sqrtf(err / MAX_CHORD_ERROR_MM)) * 2.0f);
+                iterations = (uint_fast16_t)(ceilf(sqrtf(err / tol)) * 2.0f);
             } else {
                 iterations = 1;
             }
