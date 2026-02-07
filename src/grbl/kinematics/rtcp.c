@@ -234,13 +234,18 @@
  *     - Independiente de velocidad y longitud del movimiento
  *     - Verificado matemáticamente: compare_linuxcnc_grblhal.py
  *
- *   TRIG_CACHE_TOL (0.001°):
- *     - Tolerancia para reusar valores sin/cos cacheados
- *     - Evita recálculos innecesarios en movimientos pequeños
+ *   MAX_ARM_LENGTH_MM (500mm):
+ *     - Mínimo conservador para distancia pivot-a-pieza
+ *     - Usado como fallback si los pivot settings son muy pequeños
+ *
+ *   TRIG_CACHE_TOL:
+ *     - Calculado dinámicamente desde la distancia real del pivot
+ *     - Fórmula: RAD_TO_DEG(chord_error / arm_length)
+ *     - Se recalcula cada vez que cambian $640-$644
  */
 #define MAX_CHORD_ERROR_MM     0.01f
 #define MAX_CHORD_ERROR_G0_MM  0.5f    /* Tolerancia G0: 50x más relajada que G1 */
-#define TRIG_CACHE_TOL         0.001f
+#define MAX_ARM_LENGTH_MM      500.0f  /* Mínimo conservador (fallback) */
 
 /* Validación de constantes removida para evitar error de preprocesador con floats */
 // #if MAX_SEG_LENGTH_MM <= 0
@@ -308,6 +313,7 @@ typedef struct {
     float sin_c;            /**< sin(C) cacheado */
     float cos_c;            /**< cos(C) cacheado */
     bool cache_valid;       /**< Validez del caché */
+    float trig_cache_tol;   /**< Tolerancia angular dinámica (grados) */
 } rtcp_state_t;
 
 /* =============================================================================
@@ -400,8 +406,8 @@ static user_mcode_ptrs_t user_mcode_prev;
 static inline void update_trig_cache(float a_deg, float c_deg) 
 {
     if (!rtcp.cache_valid || 
-        fabsf(a_deg - rtcp.last_a) > TRIG_CACHE_TOL || 
-        fabsf(c_deg - rtcp.last_c) > TRIG_CACHE_TOL) 
+        fabsf(a_deg - rtcp.last_a) > rtcp.trig_cache_tol || 
+        fabsf(c_deg - rtcp.last_c) > rtcp.trig_cache_tol) 
     {
         float ar = DEG_TO_RAD(a_deg);
         float cr = DEG_TO_RAD(c_deg);
@@ -1328,6 +1334,15 @@ static const setting_descr_t kinematics_settings_descr[] = {
 static void rtcp_kinematics_settings_changed(settings_t *settings, settings_changed_flags_t changed) 
 {
     memcpy(&rtcp.cfg, &rtcp_settings_storage, sizeof(rtcp_settings_t));
+    
+    /* Recalcular tolerancia del caché a partir de la distancia real del pivot */
+    float arm = sqrtf(rtcp.cfg.pivot_x * rtcp.cfg.pivot_x +
+                      rtcp.cfg.pivot_y * rtcp.cfg.pivot_y +
+                      rtcp.cfg.pivot_z * rtcp.cfg.pivot_z);
+    if (arm < MAX_ARM_LENGTH_MM)
+        arm = MAX_ARM_LENGTH_MM;
+    rtcp.trig_cache_tol = RAD_TO_DEG(MAX_CHORD_ERROR_MM / arm);
+    
     invalidate_cache();
 }
 
@@ -1366,8 +1381,7 @@ static void rtcp_settings_load(void)
         rtcp_settings_restore();
     }
     
-    memcpy(&rtcp.cfg, &rtcp_settings_storage, sizeof(rtcp_settings_t));
-    invalidate_cache();
+    rtcp_kinematics_settings_changed(NULL, (settings_changed_flags_t){0});
 }
 
 /* =============================================================================
