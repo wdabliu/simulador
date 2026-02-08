@@ -235,11 +235,11 @@
  *     - Verificado matemáticamente: compare_linuxcnc_grblhal.py
  *
  *   MAX_ARM_LENGTH_MM (500mm):
- *     - Mínimo conservador para distancia pivot-a-pieza
+ *     - Mínimo conservador para distancia del origen de máquina al pivot
  *     - Usado como fallback si los pivot settings son muy pequeños
  *
  *   TRIG_CACHE_TOL:
- *     - Calculado dinámicamente desde la distancia real del pivot
+ *     - Calculado dinámicamente desde la distancia real del origen al pivot
  *     - Fórmula: RAD_TO_DEG(chord_error / arm_length)
  *     - Se recalcula cada vez que cambian $640-$644
  */
@@ -1335,7 +1335,7 @@ static void rtcp_kinematics_settings_changed(settings_t *settings, settings_chan
 {
     memcpy(&rtcp.cfg, &rtcp_settings_storage, sizeof(rtcp_settings_t));
     
-    /* Recalcular tolerancia del caché a partir de la distancia real del pivot */
+    /* Recalcular tolerancia del caché a partir de la distancia del origen al pivot */
     float arm = sqrtf(rtcp.cfg.pivot_x * rtcp.cfg.pivot_x +
                       rtcp.cfg.pivot_y * rtcp.cfg.pivot_y +
                       rtcp.cfg.pivot_z * rtcp.cfg.pivot_z);
