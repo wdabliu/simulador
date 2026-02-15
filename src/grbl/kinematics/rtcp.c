@@ -493,6 +493,16 @@ static float *transform_from_cartesian(float *target, float *position)
     
     update_trig_cache(a_deg, c_deg);
 
+    /* FIX A1: Detección de Gimbal Lock
+     * Cuando |cos(A)| ≈ 0 (A ≈ ±90°), el eje C pierde un grado de libertad.
+     * La transformación produce valores finitos pero incorrectos.
+     * Umbral: 0.5° de 90° → cos(89.5°) ≈ 0.0087 */
+    #define SINGULARITY_COS_THRESHOLD 0.0087f
+    if (fabsf(rtcp.cos_a) < SINGULARITY_COS_THRESHOLD) {
+        system_raise_alarm(Alarm_LimitsEngaged);
+        return NULL;
+    }
+
     /*
      * =========================================================================
      * MANEJO DE TLO EN RTCP - DOCUMENTACIÓN COMPLETA
@@ -585,6 +595,15 @@ static float *transform_from_cartesian(float *target, float *position)
         if (idx > Z_AXIS) 
             target[idx] = position[idx];
     } while(idx > Z_AXIS);
+
+    /* FIX A1: Protección contra singularidad — patrón delta.c:delta_calcAngleYZ
+     * Detecta NaN/Inf producidos por transformaciones degeneradas (ej: A=90°) */
+    for (idx = 0; idx < N_AXIS; idx++) {
+        if (!isfinite(target[idx])) {
+            system_raise_alarm(Alarm_LimitsEngaged);
+            return NULL;
+        }
+    }
 
     return target;
 }
@@ -862,7 +881,8 @@ static bool rtcp_check_travel_limits(float *target, axes_signals_t axes,
 
     /* Obtener coordenadas de motor */
     if (is_cartesian) {
-        transform_from_cartesian(motors, target);
+        if (transform_from_cartesian(motors, target) == NULL)
+            return false;  /* FIX A1: singularidad detectada */
     } else {
         memcpy(motors, target, sizeof(float) * N_AXIS);
     }
@@ -909,6 +929,19 @@ static bool rtcp_check_travel_limits(float *target, axes_signals_t axes,
         if (!orig_check_travel_limits(target, axes, true, envelope))
             return false;
     }
+
+    /* FIX M7: Verificar límites rotativos — patrón delta.c:pos_ok()
+     * Independiente de sys.homed.mask para proteger ejes rotativos siempre */
+    if (settings.axis[A_AXIS].max_travel < -0.0f) {
+        if (fabsf(motors[A_AXIS]) > -settings.axis[A_AXIS].max_travel)
+            return false;
+    }
+    #ifdef C_AXIS
+    if (settings.axis[C_AXIS].max_travel < -0.0f) {
+        if (fabsf(motors[C_AXIS]) > -settings.axis[C_AXIS].max_travel)
+            return false;
+    }
+    #endif
 
     return true;
 }
@@ -1101,7 +1134,13 @@ static float *rtcp_segment_line(float *target, float *position,
         memcpy(final_target.values, target, sizeof(final_target));
         
         /* Transformar destino a coordenadas motor para validación */
-        transform_from_cartesian(mpos.values, target);
+        if (transform_from_cartesian(mpos.values, target) == NULL) {
+            /* FIX A1: singularidad — abortar movimiento */
+            iterations = 1;
+            pl_data->condition.target_validated = On;
+            pl_data->condition.target_valid = false;
+            return mpos.values;
+        }
         
         /*
          * Validar límites del destino final.
@@ -1180,7 +1219,15 @@ static float *rtcp_segment_line(float *target, float *position,
             
             /* Motor del punto medio via cinemática real */
             float motor_mid_real[N_AXIS];
-            transform_from_cartesian(motor_mid_real, tcp_mid);
+            if (transform_from_cartesian(motor_mid_real, tcp_mid) == NULL) {
+                /* FIX A1: singularidad en punto medio — forzar segmentación máxima */
+                iterations = 2000;
+                idx = N_AXIS;
+                do { idx--; delta.values[idx] /= (float)iterations; } while(idx);
+                distance /= (float)iterations;
+                iterations++;
+                return mpos.values;
+            }
             
             /* Motor del punto medio interpolado linealmente */
             /* position = motor start, mpos.values = motor end */
@@ -1253,7 +1300,10 @@ static float *rtcp_segment_line(float *target, float *position,
         }
 
         /* Transformar a motor */
-        transform_from_cartesian(mpos.values, segment_target.values);
+        if (transform_from_cartesian(mpos.values, segment_target.values) == NULL) {
+            /* FIX A1: singularidad en segmento — abortar como delta_segment_line:287 */
+            iterations = 0;
+        }
 
         /*
          * Compensación de velocidad TCP.
@@ -1619,6 +1669,11 @@ void rtcp_5axis_init(void)
          */
         orig_check_travel_limits = grbl.check_travel_limits;
         grbl.check_travel_limits = rtcp_check_travel_limits;
+
+        /* FIX A3: Forzar verificación segmento-a-segmento para arcos
+         * Patrón delta.c:773 — NULL = grblHAL descompone el arco y
+         * llama check_travel_limits para CADA segmento */
+        grbl.check_arc_travel_limits = NULL;
 
         /*
          * Hook a apply_travel_limits.

@@ -38,6 +38,11 @@ static spindle_id_t spindle_id;
 static bool probe_invert;
 static uint32_t ticks = 0;
 static delay_t delay = { .ms = 1, .callback = NULL }; // NOTE: initial ms set to 1 for "resetting" systick timer on startup
+
+// Simulated limit switches for homing support
+static axes_signals_t sim_homing_cycle = {0};
+static uint32_t sim_homing_ticks_start = 0;
+#define SIM_HOMING_DELAY_MS 50  // Delay before triggering simulated switches
 static on_execute_realtime_ptr on_execute_realtime;
 
 void SysTick_Handler (void);
@@ -174,6 +179,11 @@ static limit_signals_t limitsGetState()
 
     signals.min.value = gpio[LIMITS_PORT0].state.value;
 
+    // Simulate limit switches during homing: after delay, report all
+    // homing axes as triggered so $H completes automatically.
+    if (sim_homing_cycle.mask && (ticks - sim_homing_ticks_start) > SIM_HOMING_DELAY_MS)
+        signals.min.mask |= sim_homing_cycle.mask;
+
     if (settings.limits.invert.mask)
         signals.min.mask ^= settings.limits.invert.mask;
 
@@ -220,6 +230,11 @@ static void limitsEnable (bool on, axes_signals_t homing_cycle)
 {
     gpio[LIMITS_PORT0].irq_mask.mask = on ? AXES_BITMASK : 0;
     gpio[LIMITS_PORT0].irq_state.mask = 0;
+
+    // Track homing state for simulated limit switches
+    sim_homing_cycle.mask = homing_cycle.mask;
+    if (homing_cycle.mask)
+        sim_homing_ticks_start = ticks;
 
   #if SQUARING_ENABLED
     gpio[LIMITS_PORT1].irq_mask.mask = on ? AXES_BITMASK : 0;
