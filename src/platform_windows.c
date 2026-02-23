@@ -98,17 +98,8 @@ void platform_kill_thread(plat_thread_t* th)
 //return char if one available.
 uint8_t platform_poll_stdin()
 {
-    if (_kbhit()) {
-        uint8_t c = getch();
-        if(c == '\b') {
-            putchar('\b');
-            putchar(' ');
-            putchar('\b');
-        } else {
-            putchar(c);
-        }
-        return c;
-    }
+    if (_kbhit())
+        return getch();
 
     return 0;
 }

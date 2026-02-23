@@ -207,7 +207,7 @@ or EMI triggering the related interrupt falsely or too many times.
 #endif
 
 #if !defined ENABLE_JERK_ACCELERATION || defined __DOXYGEN__
-#define ENABLE_JERK_ACCELERATION Off // Enable to use 3rd order acceleration calculations. May need more processing power, a FPU will help.
+#define ENABLE_JERK_ACCELERATION 1 // Enable to use 3rd order acceleration calculations. May need more processing power, a FPU will help.
 #endif
 
 // -
@@ -253,7 +253,7 @@ When increasing this value, this stores less overall time in the segment buffer 
 certain the step segment buffer is increased/decreased to account for these changes.
 */
 #if !defined ACCELERATION_TICKS_PER_SECOND || defined __DOXYGEN__
-#define ACCELERATION_TICKS_PER_SECOND 100
+#define ACCELERATION_TICKS_PER_SECOND 150
 #endif
 
 // Sets the maximum step rate allowed to be written as a grblHAL setting. This option enables an error
@@ -374,7 +374,7 @@ execution lead time there is for other grblHAL processes have to compute and do 
 before having to come back and refill this buffer, currently at ~50msec of step moves.
 */
 #if !defined SEGMENT_BUFFER_SIZE || defined __DOXYGEN__
-#define SEGMENT_BUFFER_SIZE 10 // Uncomment to override default in stepper.h.
+#define SEGMENT_BUFFER_SIZE 15 // Uncomment to override default in stepper.h.
 #endif
 
 /*! \def SET_CHECK_MODE_PROBE_TO_START
@@ -762,7 +762,7 @@ If set to \ref Off or 0 the `|DTG:` distance-to-go element is not included in th
  */
 ///@{
 #if !defined DEFAULT_ARC_TOLERANCE || defined __DOXYGEN__
-#define DEFAULT_ARC_TOLERANCE 0.002f // mm
+#define DEFAULT_ARC_TOLERANCE 0.001f // mm
 #endif
 ///@}
 

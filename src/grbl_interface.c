@@ -145,41 +145,38 @@ void grbl_app_exit (void)
     print_steps(1);
 }
 
-//show current position in steps
+//show current position in steps (all N_AXIS axes)
 static void print_steps (bool force)
-{ 
+{
     static plan_block_t* printed_block = NULL;
 
     plan_block_t* current_block = plan_get_current_block();
-    int ocr = 0;
 
-    //Allow exit when idle. Prevents aborting before all streamed commands have run
     if (sim.exit == exit_REQ && state_get() < STATE_HOMING )
         sim.exit = exit_OK;
 
     if (next_print_time == 0.0)
-        return;  //no printing
-
-    #ifdef VARIABLE_SPINDLE
-    if(SPINDLE_TCCRA_REGISTER >= 127) ocr = SPINDLE_OCR_REGISTER;
-    #endif
+        return;
 
     if (current_block != printed_block) {
-        //new block. 
-        if (block_number) //print values from the end of prev block
-            fprintf(args.step_out_file, "%12.5f %d, %d, %d, %d\n", sim.sim_time, sys.position[X_AXIS], sys.position[Y_AXIS], sys.position[Z_AXIS],ocr);
+        if (block_number) {
+            fprintf(args.step_out_file, "%12.5f", sim.sim_time);
+            for (int i = 0; i < N_AXIS; i++)
+                fprintf(args.step_out_file, " %d", sys.position[i]);
+            fprintf(args.step_out_file, "\n");
+        }
 
         printed_block = current_block;
         if (current_block == NULL)
             return;
-        // print header
         fprintf(args.step_out_file, "# block number %d\n", block_number++);
     }
-    //print at correct interval while executing block
-    else if ((current_block && sim.sim_time>=next_print_time) || force ) {
-        fprintf(args.step_out_file, "%12.5f %d, %d, %d, %d\n", sim.sim_time, sys.position[X_AXIS], sys.position[Y_AXIS], sys.position[Z_AXIS], ocr);
+    else if ((current_block && sim.sim_time >= next_print_time) || force) {
+        fprintf(args.step_out_file, "%12.5f", sim.sim_time);
+        for (int i = 0; i < N_AXIS; i++)
+            fprintf(args.step_out_file, " %d", sys.position[i]);
+        fprintf(args.step_out_file, "\n");
         fflush(args.step_out_file);
-        //make sure the simulation time doesn't get ahead of next_print_time
         while (next_print_time <= sim.sim_time)
             next_print_time += args.step_time;
     }

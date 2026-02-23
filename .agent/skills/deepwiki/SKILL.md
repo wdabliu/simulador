@@ -35,6 +35,10 @@ grblHAL/RP2040:
 
 LinuxCNC/linuxcnc:
 
+DerAndere1/Marlin:
+
+synthetos/g2:
+
 ```
 
 ### How to Add New Repositories

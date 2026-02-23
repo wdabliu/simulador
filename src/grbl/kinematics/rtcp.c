@@ -1285,6 +1285,12 @@ static float *rtcp_segment_line(float *target, float *position,
          * =====================================================================
          */
         
+        /* BYPASS: RTCP deshabilitado - retornar directo sin transformación */
+        if (!rtcp_enabled) {
+            iterations--;
+            return (iterations == 0 || jog_cancel) ? NULL : mpos.values;
+        }
+
         iterations--;
 
         /* Avanzar al siguiente punto o usar destino final */
