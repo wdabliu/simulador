@@ -219,6 +219,9 @@
 #define SETTING_PIVOT_Z         Setting_Kinematics2  /* $642 */
 #define SETTING_AXIS_OFFSET_Y   Setting_Kinematics3  /* $643 */
 #define SETTING_AXIS_OFFSET_Z   Setting_Kinematics4  /* $644 */
+#define SETTING_CHORD_ERROR     Setting_Kinematics5  /* $645 */
+#define SETTING_CHORD_ERROR_G0  Setting_Kinematics6  /* $646 */
+#define SETTING_TCP_SPEED_COMP  Setting_Kinematics7  /* $647 */
 
 /**
  * @brief Parámetros de segmentación
@@ -243,8 +246,8 @@
  *     - Fórmula: RAD_TO_DEG(chord_error / arm_length)
  *     - Se recalcula cada vez que cambian $640-$644
  */
-#define MAX_CHORD_ERROR_MM     0.01f
-#define MAX_CHORD_ERROR_G0_MM  0.5f    /* Tolerancia G0: 50x más relajada que G1 */
+#define DEFAULT_CHORD_ERROR_MM     0.01f   /* Valor por defecto para G1/G2/G3 */
+#define DEFAULT_CHORD_ERROR_G0_MM  0.5f    /* Valor por defecto para G0 (rápidos) */
 #define MAX_ARM_LENGTH_MM      500.0f  /* Mínimo conservador (fallback) */
 
 /* Validación de constantes removida para evitar error de preprocesador con floats */
@@ -287,8 +290,11 @@ typedef struct {
     float pivot_x;        /**< Coordenada X del punto de pivote (mm) */
     float pivot_y;        /**< Coordenada Y del punto de pivote (mm) */
     float pivot_z;        /**< Coordenada Z del punto de pivote (mm) */
-    float axis_offset_y;  /**< Offset Y entre ejes A y C (mm) - $643 */
-    float axis_offset_z;  /**< Offset Z entre ejes A y C (mm) - $644 */
+    float axis_offset_y;     /**< Offset Y entre ejes A y C (mm) - $643 */
+    float axis_offset_z;     /**< Offset Z entre ejes A y C (mm) - $644 */
+    float chord_error_mm;    /**< Error de cuerda máximo G1 (mm) - $645 */
+    float chord_error_g0_mm; /**< Error de cuerda máximo G0 (mm) - $646 */
+    float tcp_speed_comp;    /**< Compensación velocidad TCP: 1=ON, 0=OFF - $647 */
 } rtcp_settings_t;
 
 /**
@@ -493,15 +499,11 @@ static float *transform_from_cartesian(float *target, float *position)
     
     update_trig_cache(a_deg, c_deg);
 
-    /* FIX A1: Detección de Gimbal Lock
-     * Cuando |cos(A)| ≈ 0 (A ≈ ±90°), el eje C pierde un grado de libertad.
-     * La transformación produce valores finitos pero incorrectos.
-     * Umbral: 0.5° de 90° → cos(89.5°) ≈ 0.0087 */
-    #define SINGULARITY_COS_THRESHOLD 0.0087f
-    if (fabsf(rtcp.cos_a) < SINGULARITY_COS_THRESHOLD) {
-        system_raise_alarm(Alarm_LimitsEngaged);
-        return NULL;
-    }
+    /* NOTA: No se bloquea A=90° (gimbal lock) porque:
+     *   - La cinemática INVERSA (TCP→Motor) es determinista a A=90°
+     *   - Controladores industriales (Haas TCPC, Fanuc) permiten A=90°
+     *   - Caso de uso válido: mecanizar cilindros con C girando a A=90°
+     *   - La protección NaN/Inf al final cubre errores aritméticos reales */
 
     /*
      * =========================================================================
@@ -596,14 +598,29 @@ static float *transform_from_cartesian(float *target, float *position)
             target[idx] = position[idx];
     } while(idx > Z_AXIS);
 
-    /* FIX A1: Protección contra singularidad — patrón delta.c:delta_calcAngleYZ
-     * Detecta NaN/Inf producidos por transformaciones degeneradas (ej: A=90°) */
-    for (idx = 0; idx < N_AXIS; idx++) {
-        if (!isfinite(target[idx])) {
-            system_raise_alarm(Alarm_LimitsEngaged);
-            return NULL;
-        }
-    }
+    /*
+     * CÓDIGO COMENTADO: Protección NaN/Inf (era FIX A1, patrón delta.c)
+     * ----------------------------------------------------------------
+     * Este check detectaba NaN/Inf en los resultados de la transformación.
+     * Se comentó porque la cinemática inversa XYZAC usa exclusivamente
+     * sin()/cos() sin divisiones ni sqrt(), por lo que NUNCA produce
+     * NaN/Inf para entradas finitas. Confirmado por:
+     *   - LinuxCNC trtfuncs.c: no tiene checks NaN/Inf
+     *   - Marlin penta_axis_trt.cpp: no tiene checks NaN/Inf  
+     *   - delta.c SÍ necesita check porque usa sqrt(discriminante)
+     *
+     * Al eliminar este check, transform_from_cartesian() ya nunca
+     * retorna NULL, lo que convierte en código muerto todas las ramas
+     * que verificaban == NULL en segment_line y check_travel_limits.
+     *
+     * Código original:
+     *   for (idx = 0; idx < N_AXIS; idx++) {
+     *       if (!isfinite(target[idx])) {
+     *           system_raise_alarm(Alarm_LimitsEngaged);
+     *           return NULL;
+     *       }
+     *   }
+     */
 
     return target;
 }
@@ -881,8 +898,14 @@ static bool rtcp_check_travel_limits(float *target, axes_signals_t axes,
 
     /* Obtener coordenadas de motor */
     if (is_cartesian) {
-        if (transform_from_cartesian(motors, target) == NULL)
-            return false;  /* FIX A1: singularidad detectada */
+        transform_from_cartesian(motors, target);
+        /* CÓDIGO COMENTADO: Check singularidad en travel limits (era FIX A1)
+         * Antes retornaba false si transform_from_cartesian retornaba NULL.
+         * Eliminado porque la función ya nunca retorna NULL.
+         * Código original:
+         *   if (transform_from_cartesian(motors, target) == NULL)
+         *       return false;
+         */
     } else {
         memcpy(motors, target, sizeof(float) * N_AXIS);
     }
@@ -1134,13 +1157,22 @@ static float *rtcp_segment_line(float *target, float *position,
         memcpy(final_target.values, target, sizeof(final_target));
         
         /* Transformar destino a coordenadas motor para validación */
-        if (transform_from_cartesian(mpos.values, target) == NULL) {
-            /* FIX A1: singularidad — abortar movimiento */
-            iterations = 1;
-            pl_data->condition.target_validated = On;
-            pl_data->condition.target_valid = false;
-            return mpos.values;
-        }
+        transform_from_cartesian(mpos.values, target);
+        /*
+         * CÓDIGO COMENTADO: Aborto por singularidad en destino (era FIX A1)
+         * ----------------------------------------------------------------
+         * Antes se verificaba si transform_from_cartesian retornaba NULL
+         * y se abortaba el movimiento. Eliminado porque la función ya
+         * nunca retorna NULL (ver comentario en transform_from_cartesian).
+         *
+         * Código original:
+         *   if (transform_from_cartesian(mpos.values, target) == NULL) {
+         *       iterations = 1;
+         *       pl_data->condition.target_validated = On;
+         *       pl_data->condition.target_valid = false;
+         *       return mpos.values;
+         *   }
+         */
         
         /*
          * Validar límites del destino final.
@@ -1219,15 +1251,24 @@ static float *rtcp_segment_line(float *target, float *position,
             
             /* Motor del punto medio via cinemática real */
             float motor_mid_real[N_AXIS];
-            if (transform_from_cartesian(motor_mid_real, tcp_mid) == NULL) {
-                /* FIX A1: singularidad en punto medio — forzar segmentación máxima */
-                iterations = 2000;
-                idx = N_AXIS;
-                do { idx--; delta.values[idx] /= (float)iterations; } while(idx);
-                distance /= (float)iterations;
-                iterations++;
-                return mpos.values;
-            }
+            transform_from_cartesian(motor_mid_real, tcp_mid);
+            /*
+             * CÓDIGO COMENTADO: Fallback singularidad punto medio (era FIX A1)
+             * ----------------------------------------------------------------
+             * Antes se verificaba si transform_from_cartesian retornaba NULL
+             * (singularidad) y se forzaban iterations=2000 (máximo). 
+             * Eliminado porque la función ya nunca retorna NULL.
+             *
+             * Código original:
+             *   if (transform_from_cartesian(motor_mid_real, tcp_mid) == NULL) {
+             *       iterations = 2000;
+             *       idx = N_AXIS;
+             *       do { idx--; delta.values[idx] /= (float)iterations; } while(idx);
+             *       distance /= (float)iterations;
+             *       iterations++;
+             *       return mpos.values;
+             *   }
+             */
             
             /* Motor del punto medio interpolado linealmente */
             /* position = motor start, mpos.values = motor end */
@@ -1239,8 +1280,8 @@ static float *rtcp_segment_line(float *target, float *position,
             }
             
             float tol = pl_data->condition.rapid_motion 
-                        ? MAX_CHORD_ERROR_G0_MM 
-                        : MAX_CHORD_ERROR_MM;
+                        ? rtcp.cfg.chord_error_g0_mm 
+                        : rtcp.cfg.chord_error_mm;
             if (err_sq > tol * tol) {
                 /* N = ceil(sqrt(error / tolerancia)) × 2 (factor de seguridad) */
                 float err = sqrtf(err_sq);
@@ -1306,10 +1347,19 @@ static float *rtcp_segment_line(float *target, float *position,
         }
 
         /* Transformar a motor */
-        if (transform_from_cartesian(mpos.values, segment_target.values) == NULL) {
-            /* FIX A1: singularidad en segmento — abortar como delta_segment_line:287 */
-            iterations = 0;
-        }
+        transform_from_cartesian(mpos.values, segment_target.values);
+        /*
+         * CÓDIGO COMENTADO: Aborto por singularidad en segmento (era FIX A1)
+         * ----------------------------------------------------------------
+         * Antes se verificaba retorno NULL y se abortaba con iterations=0
+         * (patrón delta_segment_line:287). Eliminado porque la función ya
+         * nunca retorna NULL.
+         *
+         * Código original:
+         *   if (transform_from_cartesian(mpos.values, segment_target.values) == NULL) {
+         *       iterations = 0;
+         *   }
+         */
 
         /*
          * Compensación de velocidad TCP.
@@ -1321,7 +1371,8 @@ static float *rtcp_segment_line(float *target, float *position,
          * mc_line() restaura feed_rate después de cada iteración, así que
          * podemos modificarlo libremente aquí.
          */
-        if (!pl_data->condition.rapid_motion && distance > 0.0001f) {
+        if (rtcp.cfg.tcp_speed_comp >= 1.0f
+            && !pl_data->condition.rapid_motion && distance > 0.0001f) {
             float motor_distance = get_distance(mpos.values, last_motors.values);
             float rate_multiplier = motor_distance / distance;
             
@@ -1366,7 +1417,13 @@ static const setting_detail_t kinematics_settings[] = {
     { SETTING_AXIS_OFFSET_Y, Group_Kinematics, "Axis Offset Y", "mm", Format_Decimal, 
       "###0.000", "-1000", "1000", Setting_NonCore, &rtcp_settings_storage.axis_offset_y, NULL, NULL },
     { SETTING_AXIS_OFFSET_Z, Group_Kinematics, "Axis Offset Z", "mm", Format_Decimal, 
-      "###0.000", "-1000", "1000", Setting_NonCore, &rtcp_settings_storage.axis_offset_z, NULL, NULL }
+      "###0.000", "-1000", "1000", Setting_NonCore, &rtcp_settings_storage.axis_offset_z, NULL, NULL },
+    { SETTING_CHORD_ERROR, Group_Kinematics, "Error Cuerda G1", "mm", Format_Decimal, 
+      "#0.0000", "0.001", "1.0", Setting_NonCore, &rtcp_settings_storage.chord_error_mm, NULL, NULL },
+    { SETTING_CHORD_ERROR_G0, Group_Kinematics, "Error Cuerda G0", "mm", Format_Decimal, 
+      "#0.000", "0.01", "10.0", Setting_NonCore, &rtcp_settings_storage.chord_error_g0_mm, NULL, NULL },
+    { SETTING_TCP_SPEED_COMP, Group_Kinematics, "Comp Velocidad TCP", "", Format_Decimal, 
+      "#0", "0", "1", Setting_NonCore, &rtcp_settings_storage.tcp_speed_comp, NULL, NULL }
 };
 
 static const setting_descr_t kinematics_settings_descr[] = {
@@ -1378,7 +1435,13 @@ static const setting_descr_t kinematics_settings_descr[] = {
     { SETTING_AXIS_OFFSET_Y, "Y offset between A and C rotation axes (mm). "
                              "For machines where A/C axes do not intersect. Set 0 if axes intersect." },
     { SETTING_AXIS_OFFSET_Z, "Z offset between A and C rotation axes (mm). "
-                             "Distance from A axis to table surface. Set 0 if axes intersect." }
+                             "Distance from A axis to table surface. Set 0 if axes intersect." },
+    { SETTING_CHORD_ERROR, "Error de cuerda maximo para movimientos de corte G1/G2/G3 (mm). "
+                           "Menor = mas segmentos, mayor precision. Por defecto 0.01." },
+    { SETTING_CHORD_ERROR_G0, "Error de cuerda maximo para movimientos rapidos G0 (mm). "
+                              "Tolerancia relajada para velocidad. Por defecto 0.5." },
+    { SETTING_TCP_SPEED_COMP, "Compensacion de velocidad TCP (0=OFF, 1=ON). "
+                              "ON: ajusta feed rate segun distancia motor vs TCP. Por defecto ON." }
 };
 
 /**
@@ -1397,7 +1460,7 @@ static void rtcp_kinematics_settings_changed(settings_t *settings, settings_chan
                       rtcp.cfg.pivot_z * rtcp.cfg.pivot_z);
     if (arm < MAX_ARM_LENGTH_MM)
         arm = MAX_ARM_LENGTH_MM;
-    rtcp.trig_cache_tol = RAD_TO_DEG(MAX_CHORD_ERROR_MM / arm);
+    rtcp.trig_cache_tol = RAD_TO_DEG(rtcp.cfg.chord_error_mm / arm);
     
     invalidate_cache();
 }
@@ -1425,8 +1488,11 @@ static void rtcp_settings_restore(void)
     rtcp_settings_storage.pivot_x = 0.0f;
     rtcp_settings_storage.pivot_y = 0.0f;
     rtcp_settings_storage.pivot_z = 0.0f;
-    rtcp_settings_storage.axis_offset_y = 0.0f;  /* NUEVO */
-    rtcp_settings_storage.axis_offset_z = 0.0f;  /* NUEVO */
+    rtcp_settings_storage.axis_offset_y = 0.0f;
+    rtcp_settings_storage.axis_offset_z = 0.0f;
+    rtcp_settings_storage.chord_error_mm = DEFAULT_CHORD_ERROR_MM;
+    rtcp_settings_storage.chord_error_g0_mm = DEFAULT_CHORD_ERROR_G0_MM;
+    rtcp_settings_storage.tcp_speed_comp = 1.0f;
     rtcp_settings_save();
 }
 
@@ -1582,6 +1648,15 @@ static status_code_t rtcp_info(sys_state_t state, char *args)
     hal.stream.write(" mm" ASCII_EOL);
     hal.stream.write("   $644 Z = "); hal.stream.write(ftoa(rtcp.cfg.axis_offset_z, 3));
     hal.stream.write(" mm" ASCII_EOL);
+    
+    hal.stream.write(" Tolerancia Error de Cuerda:" ASCII_EOL);
+    hal.stream.write("   $645 G1 = "); hal.stream.write(ftoa(rtcp.cfg.chord_error_mm, 4));
+    hal.stream.write(" mm" ASCII_EOL);
+    hal.stream.write("   $646 G0 = "); hal.stream.write(ftoa(rtcp.cfg.chord_error_g0_mm, 3));
+    hal.stream.write(" mm" ASCII_EOL);
+    hal.stream.write("   $647 Comp Velocidad = ");
+    hal.stream.write(rtcp.cfg.tcp_speed_comp >= 1.0f ? "ON" : "OFF");
+    hal.stream.write(ASCII_EOL);
     
     hal.stream.write(" TCP Position (Cartesian):" ASCII_EOL);
     hal.stream.write("   X = "); hal.stream.write(ftoa(cart_pos[X_AXIS], 3));
