@@ -29,6 +29,7 @@
 #include "motion_control.h"
 #include "protocol.h"
 #include "state_machine.h"
+#include "kinematics/twp.h"
 
 #if NGC_PARAMETERS_ENABLE
 #include "ngc_params.h"
@@ -1387,7 +1388,27 @@ status_code_t gc_execute_block (char *block)
                                 RETURN(Status_GcodeUnsupportedCommand);
                             gc_block.non_modal_command += mantissa;
                             mantissa = 0; // Set to zero to indicate valid non-integer G command.
+                        } else if (int_value == 53 && mantissa == 10) {
+                            // G53.1 — Activate Tilted Work Plane
+                            gc_block.non_modal_command = NonModal_ActivateTWP;
+                            mantissa = 0;
                         }
+                        break;
+
+                    case 68:
+                        if (mantissa == 20) {
+                            // G68.2 — Define Tilted Work Plane (Euler ZXZ)
+                            word_bit.modal_group.G0 = On;
+                            gc_block.non_modal_command = NonModal_TiltedWorkPlane;
+                            mantissa = 0;
+                        } else
+                            RETURN(Status_GcodeUnsupportedCommand);
+                        break;
+
+                    case 69:
+                        // G69 — Cancel Tilted Work Plane
+                        word_bit.modal_group.G0 = On;
+                        gc_block.non_modal_command = NonModal_CancelTiltedWorkPlane;
                         break;
 
                     case 33: case 76:
@@ -2964,6 +2985,25 @@ status_code_t gc_execute_block (char *block)
                         RETURN(Status_GcodeG53InvalidMotionMode); // [G53 G0/1 not active]
                     break;
 
+                case NonModal_TiltedWorkPlane: // G68.2
+                    // I, J, K required (Euler angles). X, Y, Z optional (origin, default 0)
+                    if (!(gc_block.words.i && gc_block.words.j && gc_block.words.k))
+                        RETURN(Status_GcodeValueWordMissing);
+                    gc_block.words.i = gc_block.words.j = gc_block.words.k = Off;
+                    // Consume X, Y, Z as TWP origin (not axis motion)
+                    if (gc_block.words.x) { gc_block.words.x = Off; } else { gc_block.values.xyz[X_AXIS] = 0.0f; }
+                    if (gc_block.words.y) { gc_block.words.y = Off; } else { gc_block.values.xyz[Y_AXIS] = 0.0f; }
+                    if (gc_block.words.z) { gc_block.words.z = Off; } else { gc_block.values.xyz[Z_AXIS] = 0.0f; }
+                    break;
+
+                case NonModal_ActivateTWP: // G53.1
+                    if (!twp_is_defined())
+                        RETURN(Status_GcodeUnsupportedCommand); // G68.2 must be called first
+                    break;
+
+                case NonModal_CancelTiltedWorkPlane: // G69 — idempotent (NOP if not active)
+                    break;
+
 
                 default:
                     break;
@@ -4180,6 +4220,19 @@ status_code_t gc_execute_block (char *block)
         case NonModal_SetHome_1:
             memcpy(coord_system.data.coord.values, gc_state.position, sizeof(coord_data_t));
             settings_write_coord_data(CoordinateSystem_G30, &coord_system.data);
+            break;
+
+        case NonModal_TiltedWorkPlane: // G68.2 — Define TWP with Euler ZXZ angles
+            twp_set_euler_angles(gc_block.values.xyz[X_AXIS], gc_block.values.xyz[Y_AXIS], gc_block.values.xyz[Z_AXIS],
+                                 gc_block.values.ijk[I_VALUE], gc_block.values.ijk[J_VALUE], gc_block.values.ijk[K_VALUE]);
+            break;
+
+        case NonModal_ActivateTWP: // G53.1 — Activate TWP
+            twp_activate();
+            break;
+
+        case NonModal_CancelTiltedWorkPlane: // G69 — Cancel TWP (idempotent)
+            twp_deactivate();
             break;
 
         case NonModal_MacroCall:

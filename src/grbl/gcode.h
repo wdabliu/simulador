@@ -66,10 +66,13 @@ typedef enum {
     NonModal_ClearCoordinateOffset = 112,   //!< 112 - G92.2
  #if ENABLE_ACCELERATION_PROFILES
     NonModal_RestoreCoordinateOffset = 122, //!< 122 - G92.3
-    NonModal_SetAccelerationProfile = 187   //!< 187 - G187
+    NonModal_SetAccelerationProfile = 187,  //!< 187 - G187
  #else
-    NonModal_RestoreCoordinateOffset = 122 //!< 122 - G92.3
+    NonModal_RestoreCoordinateOffset = 122, //!< 122 - G92.3
  #endif
+    NonModal_CancelTiltedWorkPlane = 69,    //!< 69  - G69
+    NonModal_ActivateTWP = 531,             //!< 531 - G53.1
+    NonModal_TiltedWorkPlane = 682          //!< 682 - G68.2
 } non_modal_t;
 
 

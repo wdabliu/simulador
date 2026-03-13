@@ -389,6 +389,113 @@ static on_realtime_report_ptr orig_on_realtime_report;
 /** @brief RTCP habilitado (false = CNC cartesiano normal por defecto) */
 static bool rtcp_enabled = false;
 
+/* =============================================================================
+ * SECCIÓN 3.2: TILTED WORK PLANE (TWP) STATE — G68.2 / G53.1 / G69
+ * =============================================================================
+ */
+
+#include "twp.h"
+
+typedef struct {
+    bool active;            /**< TWP rotation is being applied */
+    bool defined;           /**< G68.2 has been called (matrix is valid) */
+    float origin[3];        /**< TWP origin (X, Y, Z) */
+    float euler[3];         /**< Euler angles in degrees (for diagnostics) */
+    float R[3][3];          /**< Rotation matrix (world → TWP) */
+    float R_inv[3][3];      /**< Inverse rotation (TWP → world) = transpose */
+} twp_state_t;
+
+static twp_state_t twp_state = {0};
+
+/**
+ * @brief Compute ZXZ Euler rotation matrix: R = Rz(a1) * Rx(a2) * Rz(a3)
+ * 
+ * @param ox,oy,oz  TWP origin in machine coordinates
+ * @param a1,a2,a3  Euler angles in degrees (I, J, K from G68.2)
+ */
+void twp_set_euler_angles(float ox, float oy, float oz, float a1, float a2, float a3)
+{
+    twp_state.origin[0] = ox;
+    twp_state.origin[1] = oy;
+    twp_state.origin[2] = oz;
+    twp_state.euler[0] = a1;
+    twp_state.euler[1] = a2;
+    twp_state.euler[2] = a3;
+
+    float r1 = a1 * RADDEG;  // I → radians
+    float r2 = a2 * RADDEG;  // J → radians
+    float r3 = a3 * RADDEG;  // K → radians
+
+    float c1 = cosf(r1), s1 = sinf(r1);
+    float c2 = cosf(r2), s2 = sinf(r2);
+    float c3 = cosf(r3), s3 = sinf(r3);
+
+    // R = Rz(a1) * Rx(a2) * Rz(a3)  —  ZXZ (Q=313)
+    twp_state.R[0][0] =  c1*c3 - s1*c2*s3;
+    twp_state.R[0][1] = -c1*s3 - s1*c2*c3;
+    twp_state.R[0][2] =  s1*s2;
+    twp_state.R[1][0] =  s1*c3 + c1*c2*s3;
+    twp_state.R[1][1] = -s1*s3 + c1*c2*c3;
+    twp_state.R[1][2] = -c1*s2;
+    twp_state.R[2][0] =  s2*s3;
+    twp_state.R[2][1] =  s2*c3;
+    twp_state.R[2][2] =  c2;
+
+    // R_inv = R^T (orthogonal matrix)
+    for (uint_fast8_t i = 0; i < 3; i++)
+        for (uint_fast8_t j = 0; j < 3; j++)
+            twp_state.R_inv[i][j] = twp_state.R[j][i];
+
+    twp_state.defined = true;
+}
+
+void twp_activate(void)
+{
+    protocol_buffer_synchronize();
+    twp_state.active = true;
+}
+
+void twp_deactivate(void)
+{
+    protocol_buffer_synchronize();
+    twp_state.active = false;
+    twp_state.defined = false;
+}
+
+bool twp_is_active(void)  { return twp_state.active;  }
+bool twp_is_defined(void) { return twp_state.defined; }
+
+/**
+ * @brief Apply TWP rotation to XYZ target in-place
+ * rotated = R * (target - origin) + origin
+ * Only affects X, Y, Z. Rotary axes pass through unchanged.
+ */
+static void twp_apply_rotation(float *target)
+{
+    float dx = target[X_AXIS] - twp_state.origin[0];
+    float dy = target[Y_AXIS] - twp_state.origin[1];
+    float dz = target[Z_AXIS] - twp_state.origin[2];
+
+    target[X_AXIS] = twp_state.R[0][0]*dx + twp_state.R[0][1]*dy + twp_state.R[0][2]*dz + twp_state.origin[0];
+    target[Y_AXIS] = twp_state.R[1][0]*dx + twp_state.R[1][1]*dy + twp_state.R[1][2]*dz + twp_state.origin[1];
+    target[Z_AXIS] = twp_state.R[2][0]*dx + twp_state.R[2][1]*dy + twp_state.R[2][2]*dz + twp_state.origin[2];
+}
+
+/**
+ * @brief Apply inverse TWP rotation to XYZ position in-place (for DRO)
+ * pos_twp = R_inv * (pos_world - origin) + origin
+ */
+static void twp_apply_inverse_rotation(float *position)
+{
+    float dx = position[X_AXIS] - twp_state.origin[0];
+    float dy = position[Y_AXIS] - twp_state.origin[1];
+    float dz = position[Z_AXIS] - twp_state.origin[2];
+
+    position[X_AXIS] = twp_state.R_inv[0][0]*dx + twp_state.R_inv[0][1]*dy + twp_state.R_inv[0][2]*dz + twp_state.origin[0];
+    position[Y_AXIS] = twp_state.R_inv[1][0]*dx + twp_state.R_inv[1][1]*dy + twp_state.R_inv[1][2]*dz + twp_state.origin[1];
+    position[Z_AXIS] = twp_state.R_inv[2][0]*dx + twp_state.R_inv[2][1]*dy + twp_state.R_inv[2][2]*dz + twp_state.origin[2];
+}
+
 /** @brief Chain pattern para M-codes M450/M451 */
 static user_mcode_ptrs_t user_mcode_prev;
 
@@ -761,6 +868,9 @@ static float *transform_steps_to_cartesian(float *position, int32_t *steps)
     /* BYPASS: RTCP deshabilitado = identidad (DRO muestra motor) */
     if (!rtcp_enabled) {
         memcpy(position, mpos, sizeof(float) * N_AXIS);
+        /* TWP inversa para DRO en plano inclinado */
+        if (twp_state.active)
+            twp_apply_inverse_rotation(position);
         return position;
     }
     
@@ -1140,6 +1250,11 @@ static float *rtcp_segment_line(float *target, float *position,
         
         /* BYPASS: RTCP deshabilitado = identidad pura (sin transformación) */
         if (!rtcp_enabled) {
+            /* TWP: rotar target XYZ si plano inclinado activo */
+            /* TWP y RTCP son mutuamente excluyentes (como LinuxCNC) */
+            if (twp_state.active) {
+                twp_apply_rotation(target);
+            }
             memcpy(mpos.values, target, sizeof(coord_data_t));
             iterations = 2;
             segmented = false;
