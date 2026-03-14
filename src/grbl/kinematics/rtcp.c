@@ -595,10 +595,18 @@ static inline void invalidate_cache(void)
  */
 static float *transform_from_cartesian(float *target, float *position) 
 {
+    /* BYPASS: RTCP desactivado = modo cartesiano, IK es identidad.
+     * Cubre homing (RTCP siempre off) y operación cartesiana normal.
+     * Alternativa: patrón delta.c (swap función en homing_cycle_get_feedrate). */
+    if (!rtcp_enabled) {
+        memcpy(target, position, sizeof(float) * N_AXIS);
+        return target;
+    }
+
     float a_deg = position[A_AXIS];
     float c_deg = position[C_AXIS];
     
-    /* BYPASS: A=0 y C=0 = identidad (sin trigonometría) */
+    /* Optimización: A=0 y C=0 con RTCP activo = identidad (sin trigonometría) */
     if (fabsf(a_deg) < 0.001f && fabsf(c_deg) < 0.001f) {
         memcpy(target, position, sizeof(float) * N_AXIS);
         return target;
@@ -1106,6 +1114,13 @@ static bool rtcp_check_travel_limits(float *target, axes_signals_t axes,
  */
 static void rtcp_apply_travel_limits(float *target, float *position, work_envelope_t *envelope)
 {
+    /* BYPASS: RTCP deshabilitado - usar clipping lineal nativo */
+    if (!rtcp_enabled) {
+        if (orig_apply_travel_limits)
+            orig_apply_travel_limits(target, position, envelope);
+        return;
+    }
+
     /* Si no hay ejes homeados o no hay posición de referencia, no hacer nada */
     if (sys.homed.mask == 0 || position == NULL) 
         return;
