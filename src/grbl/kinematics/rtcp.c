@@ -309,6 +309,7 @@ typedef struct {
  * alta tasa de segmentación sin afectar el rendimiento del stepper.
  */
 typedef struct {
+    bool active;            /**< RTCP activo: M451=true, M450=false */
     rtcp_settings_t cfg;    /**< Configuración activa */
     
     /* Caché trigonométrico */
@@ -380,14 +381,13 @@ static on_realtime_report_ptr orig_on_realtime_report;
  * SECCIÓN 3.1: ESTADO DE MODO RTCP
  * =============================================================================
  * 
- * Cuando rtcp_enabled=false, el módulo funciona como identidad:
+ * Cuando rtcp.active=false, el módulo funciona como identidad:
  *   - segment_line retorna target sin transformar
  *   - transform_steps_to_cartesian es conversión directa
  *   - No se calculan sin/cos (bypass completo)
+ *
+ * El flag rtcp.active vive en rtcp_state_t, consistente con twp_state.active.
  */
-
-/** @brief RTCP habilitado (false = CNC cartesiano normal por defecto) */
-static bool rtcp_enabled = false;
 
 /* =============================================================================
  * SECCIÓN 3.2: TILTED WORK PLANE (TWP) STATE — G68.2 / G53.1 / G69
@@ -598,7 +598,7 @@ static float *transform_from_cartesian(float *target, float *position)
     /* BYPASS: RTCP desactivado = modo cartesiano, IK es identidad.
      * Cubre homing (RTCP siempre off) y operación cartesiana normal.
      * Alternativa: patrón delta.c (swap función en homing_cycle_get_feedrate). */
-    if (!rtcp_enabled) {
+    if (!rtcp.active) {
         memcpy(target, position, sizeof(float) * N_AXIS);
         return target;
     }
@@ -874,7 +874,7 @@ static float *transform_steps_to_cartesian(float *position, int32_t *steps)
     } while(idx);
     
     /* BYPASS: RTCP deshabilitado = identidad (DRO muestra motor) */
-    if (!rtcp_enabled) {
+    if (!rtcp.active) {
         memcpy(position, mpos, sizeof(float) * N_AXIS);
         /* TWP inversa para DRO en plano inclinado */
         if (twp_state.active)
@@ -1006,7 +1006,7 @@ static bool rtcp_check_travel_limits(float *target, axes_signals_t axes,
                                       bool is_cartesian, work_envelope_t *envelope) 
 {
     /* BYPASS: RTCP deshabilitado - comportamiento cartesiano normal */
-    if (!rtcp_enabled) {
+    if (!rtcp.active) {
         return orig_check_travel_limits 
             ? orig_check_travel_limits(target, axes, is_cartesian, envelope)
             : is_cartesian;
@@ -1115,7 +1115,7 @@ static bool rtcp_check_travel_limits(float *target, axes_signals_t axes,
 static void rtcp_apply_travel_limits(float *target, float *position, work_envelope_t *envelope)
 {
     /* BYPASS: RTCP deshabilitado - usar clipping lineal nativo */
-    if (!rtcp_enabled) {
+    if (!rtcp.active) {
         if (orig_apply_travel_limits)
             orig_apply_travel_limits(target, position, envelope);
         return;
@@ -1264,7 +1264,7 @@ static float *rtcp_segment_line(float *target, float *position,
         jog_cancel = false;
         
         /* BYPASS: RTCP deshabilitado = identidad pura (sin transformación) */
-        if (!rtcp_enabled) {
+        if (!rtcp.active) {
             /* TWP: rotar target XYZ si plano inclinado activo */
             /* TWP y RTCP son mutuamente excluyentes (como LinuxCNC) */
             if (twp_state.active) {
@@ -1457,7 +1457,7 @@ static float *rtcp_segment_line(float *target, float *position,
          */
         
         /* BYPASS: RTCP deshabilitado - retornar directo sin transformación */
-        if (!rtcp_enabled) {
+        if (!rtcp.active) {
             iterations--;
             return (iterations == 0 || jog_cancel) ? NULL : mpos.values;
         }
@@ -1666,7 +1666,7 @@ static void report_options(bool newopt)
  */
 static void rtcp_realtime_report(stream_write_ptr stream_write, report_tracking_flags_t report)
 {
-    stream_write(rtcp_enabled ? "|RTCP:ON" : "|RTCP:OFF");
+    stream_write(rtcp.active ? "|RTCP:ON" : "|RTCP:OFF");
     
     if (orig_on_realtime_report)
         orig_on_realtime_report(stream_write, report);
@@ -1712,7 +1712,7 @@ static status_code_t rtcp_mcode_validate(parser_block_t *gc_block)
  */
 static void rtcp_mcode_execute(sys_state_t state, parser_block_t *gc_block)
 {
-    if (gc_block->user_mcode == 450 && rtcp_enabled) {
+    if (gc_block->user_mcode == 450 && rtcp.active) {
         /* Advertencia si ejes rotativos no están en cero */
         float a_pos = sys.position[A_AXIS] / settings.axis[A_AXIS].steps_per_mm;
         bool warn = fabsf(a_pos) > 0.1f;
@@ -1725,12 +1725,12 @@ static void rtcp_mcode_execute(sys_state_t state, parser_block_t *gc_block)
         if (warn)
             hal.stream.write("[MSG:Warning: RTCP OFF with rotary axes not at zero]" ASCII_EOL);
         
-        rtcp_enabled = false;
+        rtcp.active = false;
         invalidate_cache();
     } else if (gc_block->user_mcode == 450) {
         /* Ya está deshabilitado, no hacer nada */
     } else if (gc_block->user_mcode == 451) {
-        rtcp_enabled = true;
+        rtcp.active = true;
         invalidate_cache();
     } else if (user_mcode_prev.execute) {
         user_mcode_prev.execute(state, gc_block);
@@ -1762,7 +1762,7 @@ static status_code_t rtcp_info(sys_state_t state, char *args)
     hal.stream.write("5-Axis RTCP v17.1 Status:" ASCII_EOL);
     hal.stream.write("==========================" ASCII_EOL);
     hal.stream.write(" RTCP Mode: ");
-    hal.stream.write(rtcp_enabled ? "ON (M451)" : "OFF (M450)");
+    hal.stream.write(rtcp.active ? "ON (M451)" : "OFF (M450)");
     hal.stream.write(ASCII_EOL);
     
     hal.stream.write(" Pivot Point:" ASCII_EOL);
