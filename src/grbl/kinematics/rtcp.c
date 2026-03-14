@@ -196,17 +196,11 @@
  * =============================================================================
  */
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846f
-#endif
-
-/**
- * @brief Conversión grados a radianes
- * @note El RP2350 tiene FPU, pero las conversiones frecuentes siguen
- *       siendo costosas. Por eso usamos caché trigonométrico.
+/*
+ * Conversión grados ↔ radianes: usa RADDEG y DEGRAD de nuts_bolts.h
+ * RADDEG = π/180 (grados → radianes)
+ * DEGRAD = 180/π (radianes → grados)
  */
-#define DEG_TO_RAD(d) ((d) * (M_PI / 180.0f))
-#define RAD_TO_DEG(r) ((r) * (180.0f / M_PI))
 
 /**
  * @brief IDs de settings para parámetros RTCP
@@ -243,7 +237,7 @@
  *
  *   TRIG_CACHE_TOL:
  *     - Calculado dinámicamente desde la distancia real del origen al pivot
- *     - Fórmula: RAD_TO_DEG(chord_error / arm_length)
+ *     - Fórmula: (chord_error / arm_length) * DEGRAD
  *     - Se recalcula cada vez que cambian $640-$644
  */
 #define DEFAULT_CHORD_ERROR_MM     0.01f   /* Valor por defecto para G1/G2/G3 */
@@ -522,8 +516,8 @@ static inline void update_trig_cache(float a_deg, float c_deg)
         fabsf(a_deg - rtcp.last_a) > rtcp.trig_cache_tol || 
         fabsf(c_deg - rtcp.last_c) > rtcp.trig_cache_tol) 
     {
-        float ar = DEG_TO_RAD(a_deg);
-        float cr = DEG_TO_RAD(c_deg);
+        float ar = a_deg * RADDEG;
+        float cr = c_deg * RADDEG;
         
         rtcp.sin_a = sinf(ar); 
         rtcp.cos_a = cosf(ar);
@@ -780,8 +774,8 @@ static float *transform_to_cartesian(float *target, float *motor_pos)
     }
     
     /* Calcular trigonometría localmente (no usar caché global) */
-    float ar = DEG_TO_RAD(a_deg);
-    float cr = DEG_TO_RAD(c_deg);
+    float ar = a_deg * RADDEG;
+    float cr = c_deg * RADDEG;
     float sa = sinf(ar), ca = cosf(ar);
     float sc = sinf(cr), cc = cosf(cr);
 
@@ -1590,7 +1584,7 @@ static void rtcp_kinematics_settings_changed(settings_t *settings, settings_chan
                       rtcp.cfg.pivot_z * rtcp.cfg.pivot_z);
     if (arm < MAX_ARM_LENGTH_MM)
         arm = MAX_ARM_LENGTH_MM;
-    rtcp.trig_cache_tol = RAD_TO_DEG(rtcp.cfg.chord_error_mm / arm);
+    rtcp.trig_cache_tol = (rtcp.cfg.chord_error_mm / arm) * DEGRAD;
     
     invalidate_cache();
 }
