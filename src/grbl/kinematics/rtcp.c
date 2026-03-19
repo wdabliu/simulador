@@ -1115,8 +1115,22 @@ static void rtcp_apply_travel_limits(float *target, float *position, work_envelo
         return;
     }
 
-    /* Si no hay ejes homeados o no hay posición de referencia, no hacer nada */
-    if (sys.homed.mask == 0 || position == NULL) 
+    /* Sin ejes homeados: no hay envelope válido, nada que hacer.
+     *
+     * position == NULL: viene de mc_probe_cycle() (probing con soft_limited).
+     * En CNC industrial, probing (G38.x) NUNCA se ejecuta con RTCP activo;
+     * el operador siempre hace M450 (RTCP OFF) antes de un ciclo de probing.
+     * Cuando RTCP está OFF, el bypass en L1112 delega a orig_apply_travel_limits
+     * que sí clampea correctamente eje-por-eje (machine_limits.c:840-845).
+     * 
+     * Si por error se llegara aquí con RTCP ON y position==NULL, la protección
+     * se delega a segment_line(init) → check_travel_limits → limits_soft_check
+     * que abortará con Alarm_SoftLimit si el destino excede el envelope.
+     *
+     * TODO ROBUSTEZ: Generar alarma explícita si se detecta probing (position==NULL)
+     * con RTCP activo, en lugar de fallar silenciosamente. Esto protegería contra
+     * uso incorrecto por parte del operador o postprocesador. */
+    if (sys.homed.mask == 0 || position == NULL)
         return;
 
     /* Si el destino ya es válido, no necesitamos modificarlo */
@@ -1721,11 +1735,31 @@ static void rtcp_mcode_execute(sys_state_t state, parser_block_t *gc_block)
         
         rtcp.active = false;
         invalidate_cache();
+
+        /* Rebaseline: RTCP OFF = identidad, gc_state.position = motor_pos crudo.
+         * NO usar gc_sync_position() aquí porque system_convert_array_steps_to_mpos
+         * llama kinematics.transform_steps_to_cartesian que aplica FK (aún estaba
+         * activo al momento de la llamada). Calcular manualmente. */
+        {
+            uint_fast8_t idx = N_AXIS;
+            do {
+                idx--;
+                gc_state.position[idx] = sys.position[idx] / settings.axis[idx].steps_per_mm;
+            } while(idx);
+        }
+
     } else if (gc_block->user_mcode == 450) {
         /* Ya está deshabilitado, no hacer nada */
     } else if (gc_block->user_mcode == 451) {
         rtcp.active = true;
         invalidate_cache();
+
+        /* Rebaseline: RTCP ON, gc_state.position = FK(motor_pos).
+         * gc_sync_position() usa system_convert_array_steps_to_mpos que llama
+         * kinematics.transform_steps_to_cartesian (= FK) automáticamente.
+         * NO usar transform_to_cartesian adicional (sería doble FK). */
+        gc_sync_position();
+
     } else if (user_mcode_prev.execute) {
         user_mcode_prev.execute(state, gc_block);
     }
